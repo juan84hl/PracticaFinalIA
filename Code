@@ -1,0 +1,315 @@
+#### Practica Final Inteligencia Artificial
+
+#### Instalacion de Dependencias y Librerias
+
+!pip install kaggle
+
+!kaggle datasets download -d Cornell-University/arxiv
+
+!unzip arxiv.zip
+
+!pip install pandas
+
+!pip install gensim spacy matplotlib transformers seaborn scikit-learn -q -U
+
+!mkdir ~/.kaggle
+!cp kaggle.json ~/.kaggle/
+!chmod 600 ~/.kaggle/kaggle.json
+
+!pip install transformers
+
+!pip install getpass
+import getpass
+
+hf_token = getpass.getpass("Enter your Hugging Face token: ")
+# Now you can use hf_token for authentication
+
+Recolección de Datos
+
+import pandas as pd
+
+# Definir el tamaño del bloque
+chunk_size = 10000
+
+# Cargar el dataset de arXiv desde Kaggle en bloques, utilizando 'lines=True' para leer el archivo línea por línea
+data_iterator = pd.read_json('/content/arxiv-metadata-oai-snapshot.json', lines=True, chunksize=chunk_size)
+
+# Mostrar una muestra de los datos
+for chunk in data_iterator:
+    print(chunk)
+
+
+Preprocesamiento
+
+import re
+import pandas as pd
+from multiprocessing import Pool
+
+# Function to clean and normalize the text
+def preprocess_text(text):
+    # Convert to lowercase
+    text = text.lower()
+    # Remove special characters and numbers
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
+    # Remove multiple spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+# Modified process_row function to handle (index, row) tuples
+def process_row(row_tuple):
+    index, row = row_tuple  # Unpack the tuple
+    row['abstract'] = preprocess_text(row['abstract'])
+    return row.to_dict()  # Return the processed row as a dictionary
+
+def process_and_yield_data(file_path, chunk_size=10000, num_processes=4):
+    """
+    Processes data in chunks and yields each processed row as a dictionary,
+    using multiprocessing for parallel processing.
+
+    Args:
+        file_path (str): Path to the JSON file.
+        chunk_size (int): Number of rows to read per chunk.
+        num_processes (int): Number of processes to use for parallel processing.
+
+    Yields:
+        dict: A dictionary representing a single processed row.
+    """
+    data_iterator = pd.read_json(file_path, lines=True, chunksize=chunk_size)
+    with Pool(num_processes) as pool:
+        for chunk in data_iterator:
+            for processed_row in pool.map(process_row, chunk.iterrows()):  # Pass iterrows() to process_row
+                yield processed_row
+
+# Example usage:
+file_path = '/content/arxiv-metadata-oai-snapshot.json'  # Replace with your actual file path
+
+# Iterate over processed rows and do something with them
+# (e.g., append to a list, write to a file, etc.)
+processed_data = []
+for processed_row in process_and_yield_data(file_path):
+    processed_data.append(processed_row)
+
+# Now you have all the processed data in the 'processed_data' list
+# You can convert it to a DataFrame if needed:
+df = pd.DataFrame(processed_data)
+print(df.head())
+
+
+Generación de Embeddings
+
+from transformers import DistilBertTokenizer, DistilBertModel
+import torch
+import numpy as np
+import pandas as pd
+
+# Load the DistilBERT tokenizer and pretrained model
+tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+model = DistilBertModel.from_pretrained('distilbert-base-uncased')
+
+# Check if a GPU is available and move the model accordingly
+if torch.cuda.is_available():
+    model = model.cuda()
+    print("Model moved to GPU.")
+else:
+    print("No GPU available, using CPU.")
+
+def get_embeddings(text):
+    # Tokenize the text, truncating to the maximum length
+    input_ids = torch.tensor(tokenizer.encode(text, add_special_tokens=True, truncation=True, max_length=128)).unsqueeze(0)
+
+    # If a GPU is available, move the input tensors to the GPU
+    if torch.cuda.is_available():
+        input_ids = input_ids.cuda()
+
+    # Get the embeddings
+    with torch.no_grad():
+        outputs = model(input_ids)
+        embeddings = outputs.last_hidden_state.mean(dim=1)
+
+        # If a GPU was used, move the result back to the CPU
+        if torch.cuda.is_available():
+            embeddings = embeddings.cpu()
+
+    return embeddings.numpy()
+
+Búsqueda Semántica
+
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import pandas as pd
+from transformers import DistilBertTokenizer, DistilBertModel
+import torch
+import json
+
+# Cargar el tokenizer y el modelo preentrenado de DistilBERT
+tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+model = DistilBertModel.from_pretrained('distilbert-base-uncased')
+model = model.cuda()  # Mover el modelo a la GPU si está disponible
+
+def get_embeddings(text):
+    # Tokenizar el texto, truncando a la longitud máxima
+    input_ids = torch.tensor(tokenizer.encode(text, add_special_tokens=True, truncation=True, max_length=128)).unsqueeze(0).cuda()
+
+    # Obtener los embeddings
+    with torch.no_grad():
+        outputs = model(input_ids)
+        embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+
+    return embeddings
+
+def batch_get_embeddings(texts, batch_size=32):
+    """Obtiene embeddings en lotes."""
+    all_embeddings = []
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i: i + batch_size]
+        # Tokenizar y agregar padding a cada texto en el lote
+        encoded_batch = tokenizer.batch_encode_plus(
+            batch_texts,
+            add_special_tokens=True,
+            truncation=True,
+            max_length=128,
+            padding='max_length',
+            return_attention_mask=True,
+            return_tensors='pt'
+        )
+        # Mover los tensores a la GPU
+        batch_input_ids = encoded_batch['input_ids'].cuda()
+        batch_attention_masks = encoded_batch['attention_mask'].cuda()
+
+        with torch.no_grad():
+            batch_outputs = model(batch_input_ids, attention_mask=batch_attention_masks)
+            batch_embeddings = batch_outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+        all_embeddings.append(batch_embeddings)
+    return np.vstack(all_embeddings)
+
+# Define the 'texts' variable with your list of texts
+texts = ["This is the first text.", "This is another text."] # Example texts, replace with your actual data
+
+# Ejemplo de uso
+embeddings = batch_get_embeddings(texts)
+
+# Ahora puedes usar 'embeddings' para calcular la similitud del coseno u otras tareas.
+print(embeddings)
+
+
+
+Visualización
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.decomposition import PCA
+import numpy as np
+import pandas as pd
+from transformers import DistilBertTokenizer, DistilBertModel
+import torch
+
+# Cargar el tokenizer y el modelo preentrenado de DistilBERT
+tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+model = DistilBertModel.from_pretrained('distilbert-base-uncased')
+model = model.cuda()  # Mover el modelo a la GPU si está disponible
+
+def get_embeddings(text):
+    # Tokenizar el texto, truncando a la longitud máxima
+    input_ids = torch.tensor(tokenizer.encode(text, add_special_tokens=True, truncation=True, max_length=128)).unsqueeze(0).cuda()
+
+    # Obtener los embeddings
+    with torch.no_grad():
+        outputs = model(input_ids)
+        embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+
+    return embeddings
+
+def batch_get_embeddings(texts, batch_size=32):
+    """Obtiene embeddings en lotes."""
+    all_embeddings = []
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i: i + batch_size]
+        # Tokenizar y agregar padding a cada texto en el lote
+        encoded_batch = tokenizer.batch_encode_plus(
+            batch_texts,
+            add_special_tokens=True,
+            truncation=True,
+            max_length=128,
+            padding='max_length',
+            return_attention_mask=True,
+            return_tensors='pt'
+        )
+        # Mover los tensores a la GPU
+        batch_input_ids = encoded_batch['input_ids'].cuda()
+        batch_attention_masks = encoded_batch['attention_mask'].cuda()
+
+        with torch.no_grad():
+            batch_outputs = model(batch_input_ids, attention_mask=batch_attention_masks)
+            batch_embeddings = batch_outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+        all_embeddings.append(batch_embeddings)
+    return np.vstack(all_embeddings)
+
+# Define the 'texts' variable with your list of texts, or create a DataFrame 'data'
+# Example with a list of texts:
+texts = ["This is the first text.", "This is another text."]
+# If you have a DataFrame 'data' with a column 'embeddings', uncomment the line below:
+# texts = list(data['embeddings'])
+
+# Calcula los embeddings
+embeddings = batch_get_embeddings(texts)
+
+# Function to visualize results
+def visualize_results(results):
+    embeddings = np.vstack(results['embeddings'].values)
+    pca = PCA(n_components=2)
+    embeddings = pca.fit_transform(embeddings)
+
+    plt.figure(figsize=(10, 6))
+    sns.scatterplot(x=embeddings[:, 0], y=embeddings[:, 1], hue=results['category'], palette='viridis')
+    for i, row in results.iterrows():
+        plt.text(embeddings[i, 0], embeddings[i, 1], row['title'], fontsize=9)
+    plt.title('Visualization of Results')
+    plt.show()
+
+# Example results DataFrame - replace this with your actual data
+results = pd.DataFrame({
+    'embeddings': [embeddings[0], embeddings[1]],  # Usa los embeddings calculados
+    'category': ['Categoría 1', 'Categoría 2'],  # Reemplaza con tus categorías reales
+    'title': ['PCA 1', 'PCA 2']  # Reemplaza con tus títulos reales
+})
+
+# Visualiza los resultados
+visualize_results(results)
+
+
+Evaluación
+
+import json
+import pandas as pd
+
+# Placeholder for the search function - you'll need to define this based on your needs
+def search(query, data, top_k=5):
+    # Implement your search logic here.
+    # For demonstration, let's just return a dummy DataFrame
+    results = pd.DataFrame({
+        'title': ['Result 1', 'Result 2', 'Result 3', 'Result 4', 'Result 5'],
+        'relevance': [1, 0, 1, 1, 0]  # Example relevance scores
+    })
+    return results
+
+# Function to evaluate the precision of the search
+def evaluate_search(query, data_file, top_k=5):
+    # Read the JSON file line by line to avoid RAM overload
+    relevant_count = 0
+    with open(data_file, 'r') as f:
+        for line in f:
+            entry = json.loads(line)
+            # Simulate search and relevance check (replace with your actual logic)
+            if 'query' in entry['title'].lower():  # Example relevance check
+                relevant_count += 1
+                if relevant_count >= top_k:
+                    break
+
+    precision = relevant_count / top_k
+    return precision
+
+# Example evaluation
+query = "machine learning"
+data_file = "/content/arxiv-metadata-oai-snapshot.json"
+precision = evaluate_search(query, data_file)
+print(f'Precision for the query "{query}": {precision}')
